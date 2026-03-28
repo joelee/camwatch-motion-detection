@@ -1,0 +1,24 @@
+[motion_detection]
+frame_width = 320
+frame_height = 180
+frame_rate = 5
+pixel_difference_threshold = 20
+motion_ratio_threshold = 0.015
+local_motion_ratio_threshold = 0.095
+local_motion_consecutive_frames = 4
+background_alpha = 0.08
+event_cooldown_seconds = 10
+snapshot_jpeg_quality = 80
+
+mqtt_host = "127.0.0.1"
+mqtt_port = 1883
+mqtt_topic = "camwatch/motion"
+mqtt_client_id = "camwatch-motion-detection"
+mqtt_username = ""
+mqtt_password = ""
+mqtt_qos = 1
+mqtt_keep_alive_seconds = 30
+
+rtsp_transport = "tcp"
+rtsp_retry_delay_seconds = 5
+rtsp_max_retries = 12

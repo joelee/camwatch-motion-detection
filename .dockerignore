@@ -1,0 +1,6 @@
+.git
+.gitignore
+target
+debug
+.pre-commit-config.yaml
+samples
