@@ -23,6 +23,7 @@ This repository hosts a lightweight Rust CLI that reads an RTSP stream or video 
 - Prefer simple frame-difference math over heavyweight dependencies unless profiling shows a clear need.
 - Document MQTT payload shape and config changes in `README.md` and `docs/`.
 - Prefer comments that explain why a thread, channel, or algorithm exists over comments that restate syntax.
+- Prefer unit tests for deterministic logic in `src/`, and use integration tests in `tests/` when the behavior depends on ffmpeg, video fixtures, or end-to-end output files.
 
 ## Operational notes
 

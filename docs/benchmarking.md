@@ -44,6 +44,26 @@ The script:
 - runs a small benchmark matrix with fixed detection resolution
 - writes a timestamped report into `benchmark-results/`
 
+## Markdown conversion
+
+To turn a saved report into Markdown tables:
+
+```bash
+scripts/benchmark-report-to-markdown.py benchmark-results/benchmark-YYYYMMDD-HHMMSS.txt
+```
+
+To save the Markdown to a file:
+
+```bash
+scripts/benchmark-report-to-markdown.py benchmark-results/benchmark-YYYYMMDD-HHMMSS.txt --output benchmark-results/benchmark-YYYYMMDD-HHMMSS.md
+```
+
+The generated Markdown includes:
+
+- an environment table with host and tool versions
+- a summary table with the median benchmark metrics
+- a command section showing the benchmark invocations used in the run
+
 ## Memory and CPU
 
 To capture rough resource numbers on Linux, wrap each command with a helper such as Python's

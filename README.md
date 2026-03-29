@@ -182,6 +182,7 @@ More detail lives in `docs/mqtt-payload.md`.
 - The helper supports separate detection and output resolutions with `--detect-width`, `--detect-height`, `--output-width`, and `--output-height`.
 - It also supports `--mode aspect16x9` to compare `320x180`, `640x360`, and `1280x720` style outputs in one run.
 - Use `scripts/run-benchmarks.sh` on a target machine to build the benchmark, run the matrix, and save a timestamped report.
+- Use `scripts/benchmark-report-to-markdown.py` to convert a saved benchmark report into Markdown tables.
 - Benchmark instructions and sample results live in `docs/benchmarking.md`.
 
 ## Learning notes
@@ -203,6 +204,13 @@ More detail lives in `docs/mqtt-payload.md`.
 - Tests: `cargo test --all-targets`
 - Pre-commit: `pre-commit run --all-files`
 
+## Testing
+
+- Unit tests live in the Rust modules under `src/`.
+- Integration tests live in `tests/` and use fixture videos from `tests/video/`.
+- File-output integration tests write generated artifacts to `tests/output/`, which is gitignored.
+- Detailed test documentation lives in `docs/testing.md`.
+
 ## Video fixture tests
 
 - Add MP4 fixtures to `tests/video/`.
@@ -222,7 +230,17 @@ More detail lives in `docs/mqtt-payload.md`.
 - `camwatch.toml`: runtime configuration under `[motion_detection]`.
 - `tests/video_fixtures.rs`: end-to-end motion checks against MP4 fixtures in `tests/video/`.
 
-More detail lives in `docs/architecture.md`, `docs/benchmarking.md`, `docs/configuration.md`, `docs/docker.md`, `docs/mqtt-payload.md`, and `AGENTS.md`.
+## Documentation
+
+For more details, see the following documentation:
+
+- [Architecture](docs/architecture.md): processing architecture, module boundaries, trade-offs, and the motion pipeline diagram.
+- [Benchmarking](docs/benchmarking.md): benchmark modes, helper scripts, and sample performance results.
+- [Configuration](docs/configuration.md): complete `camwatch.toml` settings reference and tuning notes.
+- [Docker](docs/docker.md): Docker and Compose files, environment variables, and container defaults.
+- [MQTT Payload](docs/mqtt-payload.md): MQTT event payload fields and example JSON.
+- [Testing](docs/testing.md): unit tests, integration tests, fixture naming, and test commands.
+
 
 ## License
 
