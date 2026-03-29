@@ -1,14 +1,20 @@
 [motion_detection]
 frame_width = 320
 frame_height = 180
+# output_frame_width = 1920
+# output_frame_height = 1080
 frame_rate = 5
 pixel_difference_threshold = 20
 motion_ratio_threshold = 0.015
 local_motion_ratio_threshold = 0.095
 local_motion_consecutive_frames = 4
+motion_end_grace_seconds = 1
+motion_snapshot_delay_seconds = 5
+long_motion_snapshot_interval_seconds = 30
 background_alpha = 0.08
 event_cooldown_seconds = 10
 snapshot_jpeg_quality = 80
+output_directory = ""
 
 mqtt_host = "127.0.0.1"
 mqtt_port = 1883

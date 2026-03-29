@@ -4,8 +4,6 @@
 //! from that background. It scores both whole-frame change and localized tile change so distant
 //! people or small moving objects can still trigger motion without requiring huge scene changes.
 
-use std::time::{Duration, Instant};
-
 use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 
 use crate::{config::MotionDetectionConfig, ffmpeg::VideoFrame};
@@ -16,48 +14,99 @@ pub struct MotionEvent {
     pub local_motion_ratio: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MotionAnalysis {
+    pub motion_ratio: f32,
+    pub local_motion_ratio: f32,
+    pub global_triggered: bool,
+    pub local_triggered: bool,
+}
+
+impl MotionAnalysis {
+    pub fn is_motion_active(self) -> bool {
+        self.global_triggered || self.local_triggered
+    }
+
+    pub fn event(self) -> MotionEvent {
+        MotionEvent {
+            motion_ratio: self.motion_ratio,
+            local_motion_ratio: self.local_motion_ratio,
+        }
+    }
+}
+
 pub struct MotionDetector {
+    detection_width: u32,
+    detection_height: u32,
     pixel_difference_threshold: u8,
     motion_ratio_threshold: f32,
     local_motion_ratio_threshold: f32,
-    local_motion_consecutive_frames: u32,
     background_alpha: f32,
-    cooldown: Duration,
     background: Option<Vec<f32>>,
-    last_event_at: Option<Instant>,
-    local_motion_streak: u32,
 }
 
 impl MotionDetector {
     pub fn new(settings: &MotionDetectionConfig) -> Self {
         Self {
+            detection_width: settings.frame_width,
+            detection_height: settings.frame_height,
             pixel_difference_threshold: settings.pixel_difference_threshold,
             motion_ratio_threshold: settings.motion_ratio_threshold,
             local_motion_ratio_threshold: settings.local_motion_ratio_threshold,
-            local_motion_consecutive_frames: settings.local_motion_consecutive_frames,
             background_alpha: settings.background_alpha,
-            cooldown: Duration::from_secs(settings.event_cooldown_seconds),
             background: None,
-            last_event_at: None,
-            local_motion_streak: 0,
         }
     }
 
-    pub fn analyze(&mut self, frame: &VideoFrame) -> Option<MotionEvent> {
+    pub fn analyze(&mut self, frame: &VideoFrame) -> MotionAnalysis {
         // Motion detection works on grayscale because it is cheaper and color is not important for
         // simple frame-difference math.
-        let grayscale = rgb_to_luma(&frame.rgb);
+        let grayscale = sample_rgb_to_luma(
+            &frame.rgb,
+            frame.width,
+            frame.height,
+            self.detection_width,
+            self.detection_height,
+        );
 
         if self.background.is_none() {
             // The very first frame becomes the starting background reference.
             self.background = Some(grayscale.iter().map(|value| f32::from(*value)).collect());
-            return None;
+            return MotionAnalysis {
+                motion_ratio: 0.0,
+                local_motion_ratio: 0.0,
+                global_triggered: false,
+                local_triggered: false,
+            };
         }
 
-        let background = self.background.as_mut()?;
+        let Some(background) = self.background.as_mut() else {
+            return MotionAnalysis {
+                motion_ratio: 0.0,
+                local_motion_ratio: 0.0,
+                global_triggered: false,
+                local_triggered: false,
+            };
+        };
+
+        let Ok(frame_width) = usize::try_from(self.detection_width) else {
+            return MotionAnalysis {
+                motion_ratio: 0.0,
+                local_motion_ratio: 0.0,
+                global_triggered: false,
+                local_triggered: false,
+            };
+        };
+        let Ok(frame_height) = usize::try_from(self.detection_height) else {
+            return MotionAnalysis {
+                motion_ratio: 0.0,
+                local_motion_ratio: 0.0,
+                global_triggered: false,
+                local_triggered: false,
+            };
+        };
+
         let mut changed_pixels = 0_usize;
-        let frame_width = usize::try_from(frame.width).ok()?;
-        let frame_height = usize::try_from(frame.height).ok()?;
         let tile_width = usize::max(1, frame_width.div_ceil(10));
         let tile_height = usize::max(1, frame_height.div_ceil(10));
         let tiles_x = frame_width.div_ceil(tile_width);
@@ -106,31 +155,12 @@ impl MotionDetector {
             })
             .fold(0.0_f32, f32::max);
 
-        if local_motion_ratio >= self.local_motion_ratio_threshold {
-            self.local_motion_streak = self.local_motion_streak.saturating_add(1);
-        } else {
-            self.local_motion_streak = 0;
-        }
-
-        let local_motion_triggered =
-            self.local_motion_streak >= self.local_motion_consecutive_frames;
-
-        if motion_ratio < self.motion_ratio_threshold && !local_motion_triggered {
-            return None;
-        }
-
-        let now = Instant::now();
-        if let Some(last_event_at) = self.last_event_at
-            && now.duration_since(last_event_at) < self.cooldown
-        {
-            return None;
-        }
-
-        self.last_event_at = Some(now);
-        Some(MotionEvent {
+        MotionAnalysis {
             motion_ratio,
             local_motion_ratio,
-        })
+            global_triggered: motion_ratio >= self.motion_ratio_threshold,
+            local_triggered: local_motion_ratio >= self.local_motion_ratio_threshold,
+        }
     }
 }
 
@@ -147,16 +177,49 @@ pub fn encode_snapshot_jpeg(frame: &VideoFrame, quality: u8) -> Result<Vec<u8>, 
     Ok(output)
 }
 
-fn rgb_to_luma(rgb: &[u8]) -> Vec<u8> {
-    let mut grayscale = Vec::with_capacity(rgb.len() / 3);
+fn sample_rgb_to_luma(
+    rgb: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<u8> {
+    let source_width = usize::try_from(source_width).unwrap_or(0);
+    let source_height = usize::try_from(source_height).unwrap_or(0);
+    let target_width = usize::try_from(target_width).unwrap_or(0);
+    let target_height = usize::try_from(target_height).unwrap_or(0);
 
-    for chunk in rgb.chunks_exact(3) {
-        // Integer luma math keeps the conversion fast and allocation-friendly.
-        let r = u16::from(chunk[0]);
-        let g = u16::from(chunk[1]);
-        let b = u16::from(chunk[2]);
-        let luma = (77 * r + 150 * g + 29 * b) >> 8;
-        grayscale.push(luma as u8);
+    if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
+        return Vec::new();
+    }
+
+    let mut grayscale = Vec::with_capacity(target_width * target_height);
+
+    for target_y in 0..target_height {
+        let source_y = target_y * source_height / target_height;
+        let source_y_end = usize::max(source_y + 1, (target_y + 1) * source_height / target_height);
+        for target_x in 0..target_width {
+            let source_x = target_x * source_width / target_width;
+            let source_x_end =
+                usize::max(source_x + 1, (target_x + 1) * source_width / target_width);
+            let mut luma_sum = 0_u64;
+            let mut pixel_count = 0_u64;
+
+            for y in source_y..source_y_end {
+                for x in source_x..source_x_end {
+                    let index = ((y * source_width) + x) * 3;
+                    let r = u16::from(rgb[index]);
+                    let g = u16::from(rgb[index + 1]);
+                    let b = u16::from(rgb[index + 2]);
+                    // Integer luma math keeps the conversion fast and allocation-friendly.
+                    let luma = (77 * r + 150 * g + 29 * b) >> 8;
+                    luma_sum += u64::from(luma);
+                    pixel_count += 1;
+                }
+            }
+
+            grayscale.push((luma_sum / pixel_count) as u8);
+        }
     }
 
     grayscale
@@ -166,7 +229,7 @@ fn rgb_to_luma(rgb: &[u8]) -> Vec<u8> {
 mod tests {
     use std::time::SystemTime;
 
-    use super::{MotionDetector, encode_snapshot_jpeg};
+    use super::{MotionDetector, encode_snapshot_jpeg, sample_rgb_to_luma};
     use crate::{config::MotionDetectionConfig, ffmpeg::VideoFrame};
 
     fn build_frame(width: u32, height: u32, value: u8) -> VideoFrame {
@@ -189,53 +252,36 @@ mod tests {
         let mut detector = MotionDetector::new(&MotionDetectionConfig::default());
         let frame = build_frame(4, 4, 10);
 
-        assert!(detector.analyze(&frame).is_none());
+        assert!(!detector.analyze(&frame).is_motion_active());
     }
 
     #[test]
     fn detects_large_scene_change() {
         let mut detector = MotionDetector::new(&MotionDetectionConfig {
+            frame_width: 4,
+            frame_height: 4,
             motion_ratio_threshold: 0.25,
             local_motion_ratio_threshold: 0.8,
-            local_motion_consecutive_frames: 1,
             pixel_difference_threshold: 10,
-            event_cooldown_seconds: 0,
             ..MotionDetectionConfig::default()
         });
         let still = build_frame(4, 4, 0);
         let motion = build_frame(4, 4, 255);
 
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&motion).is_some());
-    }
-
-    #[test]
-    fn cooldown_suppresses_duplicate_events() {
-        let mut detector = MotionDetector::new(&MotionDetectionConfig {
-            motion_ratio_threshold: 0.25,
-            local_motion_ratio_threshold: 0.8,
-            local_motion_consecutive_frames: 1,
-            pixel_difference_threshold: 10,
-            event_cooldown_seconds: 60,
-            ..MotionDetectionConfig::default()
-        });
-        let still = build_frame(4, 4, 0);
-        let motion = build_frame(4, 4, 255);
-
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&motion).is_some());
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&motion).is_none());
+        assert!(!detector.analyze(&still).is_motion_active());
+        let analysis = detector.analyze(&motion);
+        assert!(analysis.is_motion_active());
+        assert!(analysis.global_triggered);
     }
 
     #[test]
     fn detects_small_localized_motion_cluster() {
         let mut detector = MotionDetector::new(&MotionDetectionConfig {
+            frame_width: 20,
+            frame_height: 20,
             motion_ratio_threshold: 0.2,
             local_motion_ratio_threshold: 0.2,
-            local_motion_consecutive_frames: 2,
             pixel_difference_threshold: 10,
-            event_cooldown_seconds: 0,
             ..MotionDetectionConfig::default()
         });
         let still = build_frame(20, 20, 0);
@@ -250,19 +296,20 @@ mod tests {
             }
         }
 
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&localized).is_none());
-        assert!(detector.analyze(&localized).is_some());
+        assert!(!detector.analyze(&still).is_motion_active());
+        let analysis = detector.analyze(&localized);
+        assert!(analysis.is_motion_active());
+        assert!(analysis.local_triggered);
     }
 
     #[test]
     fn ignores_sparse_noise_across_tiles() {
         let mut detector = MotionDetector::new(&MotionDetectionConfig {
+            frame_width: 100,
+            frame_height: 100,
             motion_ratio_threshold: 0.2,
             local_motion_ratio_threshold: 0.2,
-            local_motion_consecutive_frames: 2,
             pixel_difference_threshold: 10,
-            event_cooldown_seconds: 0,
             ..MotionDetectionConfig::default()
         });
         let still = build_frame(100, 100, 0);
@@ -275,35 +322,28 @@ mod tests {
             sparse.rgb[pixel + 2] = 255;
         }
 
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&sparse).is_none());
+        assert!(!detector.analyze(&still).is_motion_active());
+        assert!(!detector.analyze(&sparse).is_motion_active());
     }
 
     #[test]
-    fn single_local_spike_does_not_trigger_without_streak() {
+    fn analysis_event_carries_ratios() {
         let mut detector = MotionDetector::new(&MotionDetectionConfig {
+            frame_width: 4,
+            frame_height: 4,
             motion_ratio_threshold: 0.2,
             local_motion_ratio_threshold: 0.2,
-            local_motion_consecutive_frames: 3,
             pixel_difference_threshold: 10,
-            event_cooldown_seconds: 0,
             ..MotionDetectionConfig::default()
         });
-        let still = build_frame(20, 20, 0);
-        let mut localized = build_frame(20, 20, 0);
+        let still = build_frame(4, 4, 0);
+        let motion = build_frame(4, 4, 255);
 
-        for row in 0..4 {
-            for column in 0..4 {
-                let index = ((row * 20) + column) as usize * 3;
-                localized.rgb[index] = 255;
-                localized.rgb[index + 1] = 255;
-                localized.rgb[index + 2] = 255;
-            }
-        }
+        let _ = detector.analyze(&still);
+        let event = detector.analyze(&motion).event();
 
-        assert!(detector.analyze(&still).is_none());
-        assert!(detector.analyze(&localized).is_none());
-        assert!(detector.analyze(&still).is_none());
+        assert!(event.motion_ratio > 0.0);
+        assert!(event.local_motion_ratio > 0.0);
     }
 
     #[test]
@@ -315,5 +355,19 @@ mod tests {
         };
 
         assert!(!jpeg.is_empty());
+    }
+
+    #[test]
+    fn samples_source_frame_down_to_detection_resolution() {
+        let rgb = vec![
+            0, 0, 0, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255,
+            0, 0, 0,
+        ];
+
+        let grayscale = sample_rgb_to_luma(&rgb, 4, 2, 2, 1);
+
+        assert_eq!(grayscale.len(), 2);
+        assert_eq!(grayscale[0], 127);
+        assert_eq!(grayscale[1], 127);
     }
 }

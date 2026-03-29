@@ -4,7 +4,7 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{config::ConfigError, ffmpeg::StreamError, mqtt::MqttError};
+use crate::{config::ConfigError, ffmpeg::StreamError, mqtt::MqttError, output::OutputError};
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -16,11 +16,17 @@ pub enum AppError {
     #[error(transparent)]
     Mqtt(#[from] MqttError),
     #[error(transparent)]
+    Output(#[from] OutputError),
+    #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
     CtrlC(#[from] ctrlc::Error),
     #[error("processing thread failed")]
     ProcessingThread,
+    #[error("detection stream thread failed")]
+    DetectionStreamThread,
+    #[error("output stream thread failed")]
+    OutputStreamThread,
     #[error("mqtt publish thread failed")]
     MqttPublishThread,
     #[error("mqtt event thread failed")]

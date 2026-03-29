@@ -9,5 +9,7 @@ pub mod error;
 pub mod ffmpeg;
 pub mod motion;
 pub mod mqtt;
+pub mod output;
+pub mod session;
 
 pub use app::run;

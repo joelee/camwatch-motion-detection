@@ -114,10 +114,15 @@ Key settings:
 | --- | --- |
 | `frame_width` | `320` |
 | `frame_height` | `180` |
+| `output_frame_width` | source width |
+| `output_frame_height` | source height |
 | `frame_rate` | `5` |
 | `pixel_difference_threshold` | `20` |
 | `motion_ratio_threshold` | `0.015` |
 | `local_motion_ratio_threshold` | `0.095` |
+| `motion_snapshot_delay_seconds` | `5` |
+| `long_motion_snapshot_interval_seconds` | `30` |
+| `output_directory` | `""` |
 | `event_cooldown_seconds` | `10` |
 | `mqtt_topic` | `camwatch/motion` |
 | `rtsp_retry_delay_seconds` | `5` |
@@ -125,23 +130,59 @@ Key settings:
 
 More detail lives in `docs/configuration.md`.
 
+For outputs, configure at least one of these:
+
+- MQTT by setting both `mqtt_host` and `mqtt_topic`
+- File output by setting `output_directory`
+
+When `output_directory` is enabled, each event writes:
+
+- `motion-YYYYMMDD-HHMMSS.jpg`
+- `motion-YYYYMMDD-HHMMSS.toml`
+
+Snapshot timing follows the motion session:
+
+- If the session ends before `motion_snapshot_delay_seconds`, the saved frame comes from the middle of the motion.
+- If the session lasts longer, the first saved frame comes from `motion_snapshot_delay_seconds` after motion start.
+- If the session continues beyond `long_motion_snapshot_interval_seconds`, additional snapshots are saved every `long_motion_snapshot_interval_seconds`.
+
+Resolution behavior:
+
+- `frame_width` and `frame_height` control the lightweight motion-analysis resolution.
+- `output_frame_width` and `output_frame_height` control the saved/published snapshot size.
+- If `output_frame_width` and `output_frame_height` are omitted, snapshots keep the source video resolution.
+
 ## MQTT payload
 
-The app publishes JSON to the configured topic with motion metadata and a Base64-encoded JPEG snapshot.
+When MQTT is enabled, the app publishes JSON to the configured topic with motion metadata and a Base64-encoded JPEG snapshot.
 
 ```json
 {
   "source": "rtsp://camera.local/live",
   "captured_at_epoch_ms": 1711459200000,
+  "motion_started_at_epoch_ms": 1711459195000,
+  "motion_ended_at_epoch_ms": 1711459203000,
+  "motion_duration_ms": 8000,
   "frame_index": 42,
+  "motion_started_frame_index": 17,
+  "motion_ended_frame_index": 57,
   "motion_ratio": 0.1834,
-  "frame_width": 320,
-  "frame_height": 180,
+  "local_motion_ratio": 0.2217,
+  "frame_width": 1920,
+  "frame_height": 1080,
   "snapshot_jpeg_base64": "..."
 }
 ```
 
 More detail lives in `docs/mqtt-payload.md`.
+
+## Benchmarking
+
+- Use `cargo build --release --bin benchmark_resolution` to build the benchmark helper.
+- The helper supports separate detection and output resolutions with `--detect-width`, `--detect-height`, `--output-width`, and `--output-height`.
+- It also supports `--mode aspect16x9` to compare `320x180`, `640x360`, and `1280x720` style outputs in one run.
+- Use `scripts/run-benchmarks.sh` on a target machine to build the benchmark, run the matrix, and save a timestamped report.
+- Benchmark instructions and sample results live in `docs/benchmarking.md`.
 
 ## Learning notes
 
@@ -175,11 +216,13 @@ More detail lives in `docs/mqtt-payload.md`.
 - `src/ffmpeg.rs`: frame ingestion through `ffmpeg`.
 - `src/motion.rs`: grayscale background model and JPEG snapshots.
 - `src/mqtt.rs`: MQTT publishing runtime.
+- `src/output.rs`: shared formatting for MQTT payloads and on-disk event files.
+- `src/session.rs`: motion session tracking and delayed snapshot selection.
 - `src/app.rs`: startup, retries, and shutdown flow.
 - `camwatch.toml`: runtime configuration under `[motion_detection]`.
 - `tests/video_fixtures.rs`: end-to-end motion checks against MP4 fixtures in `tests/video/`.
 
-More detail lives in `docs/architecture.md`, `docs/configuration.md`, `docs/docker.md`, `docs/mqtt-payload.md`, and `AGENTS.md`.
+More detail lives in `docs/architecture.md`, `docs/benchmarking.md`, `docs/configuration.md`, `docs/docker.md`, `docs/mqtt-payload.md`, and `AGENTS.md`.
 
 ## License
 

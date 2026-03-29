@@ -20,6 +20,12 @@ use tracing::{debug, warn};
 
 use crate::config::{InputSource, MotionDetectionConfig};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct StreamOptions {
     pub realtime_for_files: bool,
@@ -33,7 +39,7 @@ impl Default for StreamOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VideoFrame {
     pub index: u64,
     pub captured_at: SystemTime,
@@ -45,12 +51,14 @@ pub struct VideoFrame {
 pub fn stream_input(
     input: &InputSource,
     settings: &MotionDetectionConfig,
+    output_dimensions: FrameDimensions,
     frame_sender: &SyncSender<VideoFrame>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<(), StreamError> {
     stream_input_with_options(
         input,
         settings,
+        output_dimensions,
         frame_sender,
         shutdown,
         StreamOptions::default(),
@@ -60,14 +68,20 @@ pub fn stream_input(
 pub fn stream_input_with_options(
     input: &InputSource,
     settings: &MotionDetectionConfig,
+    output_dimensions: FrameDimensions,
     frame_sender: &SyncSender<VideoFrame>,
     shutdown: &Arc<AtomicBool>,
     options: StreamOptions,
 ) -> Result<(), StreamError> {
-    let frame_size = frame_size_bytes(settings.frame_width, settings.frame_height)?;
+    let frame_size = frame_size_bytes(output_dimensions.width, output_dimensions.height)?;
     let mut command = Command::new("ffmpeg");
     command
-        .args(build_ffmpeg_args_with_options(input, settings, options))
+        .args(build_ffmpeg_args_with_options(
+            input,
+            settings,
+            output_dimensions,
+            options,
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -108,8 +122,8 @@ pub fn stream_input_with_options(
                     .send(VideoFrame {
                         index,
                         captured_at: SystemTime::now(),
-                        width: settings.frame_width,
-                        height: settings.frame_height,
+                        width: output_dimensions.width,
+                        height: output_dimensions.height,
                         rgb,
                     })
                     .map_err(|_| StreamError::FrameChannelClosed)?;
@@ -147,12 +161,21 @@ fn frame_size_bytes(width: u32, height: u32) -> Result<usize, StreamError> {
 }
 
 pub fn build_ffmpeg_args(input: &InputSource, settings: &MotionDetectionConfig) -> Vec<String> {
-    build_ffmpeg_args_with_options(input, settings, StreamOptions::default())
+    let output_dimensions = settings
+        .configured_output_dimensions()
+        .map(|(width, height)| FrameDimensions { width, height })
+        .unwrap_or(FrameDimensions {
+            width: settings.frame_width,
+            height: settings.frame_height,
+        });
+
+    build_ffmpeg_args_with_options(input, settings, output_dimensions, StreamOptions::default())
 }
 
 fn build_ffmpeg_args_with_options(
     input: &InputSource,
     settings: &MotionDetectionConfig,
+    output_dimensions: FrameDimensions,
     options: StreamOptions,
 ) -> Vec<String> {
     let mut args = vec![
@@ -184,10 +207,10 @@ fn build_ffmpeg_args_with_options(
     let filter = format!(
         "fps={},scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black",
         settings.frame_rate,
-        settings.frame_width,
-        settings.frame_height,
-        settings.frame_width,
-        settings.frame_height,
+        output_dimensions.width,
+        output_dimensions.height,
+        output_dimensions.width,
+        output_dimensions.height,
     );
 
     args.extend([
@@ -204,6 +227,52 @@ fn build_ffmpeg_args_with_options(
     args
 }
 
+pub fn resolve_output_dimensions(
+    input: &InputSource,
+    settings: &MotionDetectionConfig,
+) -> Result<FrameDimensions, StreamError> {
+    match settings.configured_output_dimensions() {
+        Some((width, height)) => Ok(FrameDimensions { width, height }),
+        None => probe_input_dimensions(input),
+    }
+}
+
+fn probe_input_dimensions(input: &InputSource) -> Result<FrameDimensions, StreamError> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            &input.display_value(),
+        ])
+        .output()
+        .map_err(StreamError::SpawnFfprobe)?;
+
+    if !output.status.success() {
+        return Err(StreamError::FfprobeExited(output.status.code()));
+    }
+
+    let dimensions = String::from_utf8(output.stdout).map_err(StreamError::ParseFfprobeUtf8)?;
+    let trimmed = dimensions.trim();
+    let Some((width, height)) = trimmed.split_once('x') else {
+        return Err(StreamError::ParseFfprobeDimensions(trimmed.to_owned()));
+    };
+
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| StreamError::ParseFfprobeDimensions(trimmed.to_owned()))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| StreamError::ParseFfprobeDimensions(trimmed.to_owned()))?;
+
+    Ok(FrameDimensions { width, height })
+}
+
 #[derive(Debug, Error)]
 pub enum StreamError {
     #[error("failed to spawn ffmpeg: {0}")]
@@ -218,6 +287,14 @@ pub enum StreamError {
     WaitForFfmpeg(io::Error),
     #[error("ffmpeg exited with code {0:?}")]
     FfmpegExited(Option<i32>),
+    #[error("failed to spawn ffprobe: {0}")]
+    SpawnFfprobe(io::Error),
+    #[error("ffprobe exited with code {0:?}")]
+    FfprobeExited(Option<i32>),
+    #[error("failed to parse ffprobe UTF-8 output: {0}")]
+    ParseFfprobeUtf8(std::string::FromUtf8Error),
+    #[error("failed to parse ffprobe dimensions from '{0}'")]
+    ParseFfprobeDimensions(String),
     #[error("frame size exceeds supported memory limits")]
     FrameTooLarge,
     #[error("frame channel closed before stream completed")]
@@ -226,7 +303,9 @@ pub enum StreamError {
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamOptions, build_ffmpeg_args, build_ffmpeg_args_with_options};
+    use super::{
+        FrameDimensions, StreamOptions, build_ffmpeg_args, build_ffmpeg_args_with_options,
+    };
     use crate::config::{InputSource, MotionDetectionConfig, RtspTransport};
 
     #[test]
@@ -261,11 +340,35 @@ mod tests {
         let args = build_ffmpeg_args_with_options(
             &InputSource::File("movie.mp4".into()),
             &MotionDetectionConfig::default(),
+            FrameDimensions {
+                width: 320,
+                height: 180,
+            },
             StreamOptions {
                 realtime_for_files: false,
             },
         );
 
         assert!(!args.iter().any(|item| item == "-re"));
+    }
+
+    #[test]
+    fn output_dimensions_drive_scale_filter() {
+        let args = build_ffmpeg_args_with_options(
+            &InputSource::File("movie.mp4".into()),
+            &MotionDetectionConfig::default(),
+            FrameDimensions {
+                width: 1280,
+                height: 720,
+            },
+            StreamOptions {
+                realtime_for_files: false,
+            },
+        );
+
+        assert!(
+            args.iter()
+                .any(|item| item.contains("scale=1280:720") && item.contains("pad=1280:720"))
+        );
     }
 }

@@ -163,14 +163,20 @@ impl RtspTransport {
 pub struct MotionDetectionConfig {
     pub frame_width: u32,
     pub frame_height: u32,
+    pub output_frame_width: Option<u32>,
+    pub output_frame_height: Option<u32>,
     pub frame_rate: u32,
     pub pixel_difference_threshold: u8,
     pub motion_ratio_threshold: f32,
     pub local_motion_ratio_threshold: f32,
     pub local_motion_consecutive_frames: u32,
+    pub motion_end_grace_seconds: u64,
+    pub motion_snapshot_delay_seconds: u64,
+    pub long_motion_snapshot_interval_seconds: u64,
     pub background_alpha: f32,
     pub event_cooldown_seconds: u64,
     pub snapshot_jpeg_quality: u8,
+    pub output_directory: Option<PathBuf>,
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub mqtt_topic: String,
@@ -189,14 +195,20 @@ impl Default for MotionDetectionConfig {
         Self {
             frame_width: 320,
             frame_height: 180,
+            output_frame_width: None,
+            output_frame_height: None,
             frame_rate: 5,
             pixel_difference_threshold: 20,
             motion_ratio_threshold: 0.015,
             local_motion_ratio_threshold: 0.095,
             local_motion_consecutive_frames: 4,
+            motion_end_grace_seconds: 1,
+            motion_snapshot_delay_seconds: 5,
+            long_motion_snapshot_interval_seconds: 30,
             background_alpha: 0.08,
             event_cooldown_seconds: 10,
             snapshot_jpeg_quality: 80,
+            output_directory: None,
             mqtt_host: "127.0.0.1".to_owned(),
             mqtt_port: 1883,
             mqtt_topic: "camwatch/motion".to_owned(),
@@ -214,76 +226,145 @@ impl Default for MotionDetectionConfig {
 
 impl MotionDetectionConfig {
     fn validate(self) -> Result<Self, ConfigError> {
+        let mut config = self;
+        let output_directory = config
+            .output_directory
+            .take()
+            .filter(|path| !path.as_os_str().is_empty());
+        let mqtt_host_set = !config.mqtt_host.trim().is_empty();
+        let mqtt_topic_set = !config.mqtt_topic.trim().is_empty();
+        let mqtt_enabled = mqtt_host_set && mqtt_topic_set;
+
         // Validation happens once at startup so the rest of the app can assume sane values.
-        if self.frame_width == 0 {
+        if config.frame_width == 0 {
             return Err(ConfigError::InvalidValue(
                 "frame_width must be greater than 0",
             ));
         }
-        if self.frame_height == 0 {
+        if config.frame_height == 0 {
             return Err(ConfigError::InvalidValue(
                 "frame_height must be greater than 0",
             ));
         }
-        if self.frame_rate == 0 {
+        if config.frame_rate == 0 {
             return Err(ConfigError::InvalidValue(
                 "frame_rate must be greater than 0",
             ));
         }
-        if !(0.0..=1.0).contains(&self.motion_ratio_threshold) || self.motion_ratio_threshold == 0.0
+        if config.output_frame_width.is_some() != config.output_frame_height.is_some() {
+            return Err(ConfigError::InvalidValue(
+                "output_frame_width and output_frame_height must either both be set or both be omitted",
+            ));
+        }
+        if let Some(output_frame_width) = config.output_frame_width
+            && output_frame_width == 0
+        {
+            return Err(ConfigError::InvalidValue(
+                "output_frame_width must be greater than 0",
+            ));
+        }
+        if let Some(output_frame_height) = config.output_frame_height
+            && output_frame_height == 0
+        {
+            return Err(ConfigError::InvalidValue(
+                "output_frame_height must be greater than 0",
+            ));
+        }
+        if !(0.0..=1.0).contains(&config.motion_ratio_threshold)
+            || config.motion_ratio_threshold == 0.0
         {
             return Err(ConfigError::InvalidValue(
                 "motion_ratio_threshold must be between 0.0 and 1.0",
             ));
         }
-        if !(0.0..=1.0).contains(&self.local_motion_ratio_threshold)
-            || self.local_motion_ratio_threshold == 0.0
+        if !(0.0..=1.0).contains(&config.local_motion_ratio_threshold)
+            || config.local_motion_ratio_threshold == 0.0
         {
             return Err(ConfigError::InvalidValue(
                 "local_motion_ratio_threshold must be between 0.0 and 1.0",
             ));
         }
-        if self.local_motion_consecutive_frames == 0 {
+        if config.local_motion_consecutive_frames == 0 {
             return Err(ConfigError::InvalidValue(
                 "local_motion_consecutive_frames must be greater than 0",
             ));
         }
-        if !(0.0..=1.0).contains(&self.background_alpha) || self.background_alpha == 0.0 {
+        if config.motion_end_grace_seconds == 0 {
+            return Err(ConfigError::InvalidValue(
+                "motion_end_grace_seconds must be greater than 0",
+            ));
+        }
+        if config.motion_snapshot_delay_seconds == 0 {
+            return Err(ConfigError::InvalidValue(
+                "motion_snapshot_delay_seconds must be greater than 0",
+            ));
+        }
+        if config.long_motion_snapshot_interval_seconds == 0 {
+            return Err(ConfigError::InvalidValue(
+                "long_motion_snapshot_interval_seconds must be greater than 0",
+            ));
+        }
+        if config.long_motion_snapshot_interval_seconds <= config.motion_snapshot_delay_seconds {
+            return Err(ConfigError::InvalidValue(
+                "long_motion_snapshot_interval_seconds must be greater than motion_snapshot_delay_seconds",
+            ));
+        }
+        if !(0.0..=1.0).contains(&config.background_alpha) || config.background_alpha == 0.0 {
             return Err(ConfigError::InvalidValue(
                 "background_alpha must be between 0.0 and 1.0",
             ));
         }
-        if self.snapshot_jpeg_quality == 0 || self.snapshot_jpeg_quality > 100 {
+        if config.snapshot_jpeg_quality == 0 || config.snapshot_jpeg_quality > 100 {
             return Err(ConfigError::InvalidValue(
                 "snapshot_jpeg_quality must be between 1 and 100",
             ));
         }
-        if self.mqtt_host.trim().is_empty() {
-            return Err(ConfigError::InvalidValue("mqtt_host must not be empty"));
+        if mqtt_host_set != mqtt_topic_set {
+            return Err(ConfigError::InvalidValue(
+                "mqtt_host and mqtt_topic must either both be set or both be empty",
+            ));
         }
-        if self.mqtt_topic.trim().is_empty() {
-            return Err(ConfigError::InvalidValue("mqtt_topic must not be empty"));
-        }
-        if self.mqtt_client_id.trim().is_empty() {
+        if mqtt_enabled && config.mqtt_client_id.trim().is_empty() {
             return Err(ConfigError::InvalidValue(
                 "mqtt_client_id must not be empty",
             ));
         }
-        if self.mqtt_qos > 2 {
+        if config.mqtt_qos > 2 {
             return Err(ConfigError::InvalidValue("mqtt_qos must be 0, 1, or 2"));
         }
-        if self.mqtt_keep_alive_seconds == 0 {
+        if mqtt_enabled && config.mqtt_keep_alive_seconds == 0 {
             return Err(ConfigError::InvalidValue(
                 "mqtt_keep_alive_seconds must be greater than 0",
             ));
         }
-        if self.rtsp_retry_delay_seconds == 0 {
+        if !mqtt_enabled && output_directory.is_none() {
+            return Err(ConfigError::InvalidValue(
+                "set mqtt_host and mqtt_topic, output_directory, or both",
+            ));
+        }
+        if config.rtsp_retry_delay_seconds == 0 {
             return Err(ConfigError::InvalidValue(
                 "rtsp_retry_delay_seconds must be greater than 0",
             ));
         }
 
-        Ok(self)
+        config.output_directory = output_directory;
+        Ok(config)
+    }
+
+    pub fn mqtt_enabled(&self) -> bool {
+        !self.mqtt_host.trim().is_empty() && !self.mqtt_topic.trim().is_empty()
+    }
+
+    pub fn output_directory_enabled(&self) -> bool {
+        self.output_directory.is_some()
+    }
+
+    pub fn configured_output_dimensions(&self) -> Option<(u32, u32)> {
+        match (self.output_frame_width, self.output_frame_height) {
+            (Some(width), Some(height)) => Some((width, height)),
+            _ => None,
+        }
     }
 }
 
@@ -408,10 +489,15 @@ mod tests {
 [motion_detection]
 frame_width = 640
 frame_height = 360
+output_frame_width = 1280
+output_frame_height = 720
 frame_rate = 3
 mqtt_topic = "custom/topic"
 local_motion_ratio_threshold = 0.2
 local_motion_consecutive_frames = 2
+motion_end_grace_seconds = 2
+motion_snapshot_delay_seconds = 4
+long_motion_snapshot_interval_seconds = 20
 rtsp_transport = "udp"
 rtsp_retry_delay_seconds = 9
 rtsp_max_retries = 2
@@ -428,10 +514,20 @@ rtsp_max_retries = 2
 
         assert_eq!(config.motion_detection.frame_width, 640);
         assert_eq!(config.motion_detection.frame_height, 360);
+        assert_eq!(config.motion_detection.output_frame_width, Some(1280));
+        assert_eq!(config.motion_detection.output_frame_height, Some(720));
         assert_eq!(config.motion_detection.frame_rate, 3);
         assert_eq!(config.motion_detection.mqtt_topic, "custom/topic");
         assert_eq!(config.motion_detection.local_motion_ratio_threshold, 0.2);
         assert_eq!(config.motion_detection.local_motion_consecutive_frames, 2);
+        assert_eq!(config.motion_detection.motion_end_grace_seconds, 2);
+        assert_eq!(config.motion_detection.motion_snapshot_delay_seconds, 4);
+        assert_eq!(
+            config
+                .motion_detection
+                .long_motion_snapshot_interval_seconds,
+            20
+        );
         assert_eq!(config.motion_detection.rtsp_transport, RtspTransport::Udp);
         assert_eq!(config.motion_detection.rtsp_retry_delay_seconds, 9);
         assert_eq!(config.motion_detection.rtsp_max_retries, 2);
@@ -441,6 +537,62 @@ rtsp_max_retries = 2
     fn rejects_invalid_qos() {
         let config = MotionDetectionConfig {
             mqtt_qos: 3,
+            ..MotionDetectionConfig::default()
+        };
+
+        let result = config.validate();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_partial_output_dimensions() {
+        let config = MotionDetectionConfig {
+            output_frame_width: Some(640),
+            output_frame_height: None,
+            ..MotionDetectionConfig::default()
+        };
+
+        let result = config.validate();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn allows_file_output_without_mqtt() {
+        let config = MotionDetectionConfig {
+            output_directory: Some("/tmp/camwatch-output".into()),
+            mqtt_host: String::new(),
+            mqtt_topic: String::new(),
+            ..MotionDetectionConfig::default()
+        };
+
+        let validated = config
+            .validate()
+            .unwrap_or_else(|error| panic!("expected file output config to validate, got {error}"));
+
+        assert!(!validated.mqtt_enabled());
+        assert!(validated.output_directory_enabled());
+    }
+
+    #[test]
+    fn rejects_config_without_any_output_target() {
+        let config = MotionDetectionConfig {
+            mqtt_host: String::new(),
+            mqtt_topic: String::new(),
+            output_directory: None,
+            ..MotionDetectionConfig::default()
+        };
+
+        let result = config.validate();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_partially_configured_mqtt() {
+        let config = MotionDetectionConfig {
+            mqtt_topic: String::new(),
             ..MotionDetectionConfig::default()
         };
 
